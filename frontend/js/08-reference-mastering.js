@@ -1,0 +1,934 @@
+// ============================================================
+// 08-reference-mastering.js — Master con referencia, bandas EQ dinámicas, preview en vivo, análisis
+// ============================================================
+      // ── MASTER CON REFERENCIA ────────────────────────────────────────────────────
+      function collectReferenceParamsObj() {
+        return {
+          eq_max_boost_db: document.getElementById("s-ref-eq").checked
+            ? document.getElementById("s-ref-boost").value
+            : "0",
+          eq_max_cut_db: document.getElementById("s-ref-eq").checked ? document.getElementById("s-ref-cut").value : "0",
+          eq_fit_method: document.getElementById("s-ref-eqmethod").value,
+          match_loudness: document.getElementById("s-ref-loudness").checked,
+          match_dynamics: document.getElementById("s-ref-dynamics").checked,
+          match_stereo_width: document.getElementById("s-ref-stereo").checked,
+          match_transient: document.getElementById("s-ref-transient").checked,
+          match_sub_bass: document.getElementById("s-ref-subbass").checked,
+          match_desser: document.getElementById("s-ref-desser").checked,
+          match_saturation: document.getElementById("s-ref-saturation").checked,
+          output_format: document.getElementById("s-format").value,
+          output_bit_depth: document.getElementById("s-bitdepth").value,
+          dither_mode: document.getElementById("s-dither-mode").value,
+          dynamics_margin_db: document.getElementById("s-ref-dynmargin").value,
+          stereo_blend: (parseFloat(document.getElementById("s-ref-stereoblend").value) / 100).toFixed(2),
+          band_gains_array: window.refBandEQ ? window.refBandEQ.getGainsArray() : [],
+          ms_eq_matching: document.getElementById("s-ref-ms-eq") ? document.getElementById("s-ref-ms-eq").checked : true,
+        };
+      }
+      const REF_PARAM_LABELS = {
+        eq_max_boost_db: "EQ boost máx (dB)",
+        eq_max_cut_db: "EQ cut máx (dB)",
+        eq_fit_method: "Método de ajuste EQ",
+        match_loudness: "Igualar loudness",
+        match_dynamics: "Igualar dinámica",
+        match_stereo_width: "Igualar ancho estéreo",
+        match_transient: "Igualar punch/transientes",
+        match_sub_bass: "Igualar perfil de sub-graves",
+        match_desser: "De-esser calibrado",
+        match_saturation: "Igualar carácter armónico",
+        output_format: "Formato salida",
+        output_bit_depth: "Bit depth",
+        dither_mode: "Modo de dither",
+        dynamics_margin_db: "Margen dinámica (dB)",
+        stereo_blend: "Mezcla estéreo",
+        band_gains_array: "Bandas de EQ manual",
+      };
+
+      async function submitReferenceMasterJob() {
+        clearResults();
+        showStatus(null, "Enviando archivos…", "queued");
+        document.getElementById("btnMasterRef").disabled = true;
+
+        const fd = new FormData();
+        if (_previewLibraryId) {
+          fd.append("library_id", _previewLibraryId);
+        } else {
+          fd.append("file", selectedFile);
+        }
+        if (selectedRefLibraryId) {
+          fd.append("reference_library_id", selectedRefLibraryId);
+        } else {
+          fd.append("reference_file", selectedRefFile);
+        }
+
+        const _refParamsObj = collectReferenceParamsObj();
+        // band_gains_array es un array de objetos — hay que JSON.stringify antes de pasar a URLSearchParams
+        if (_refParamsObj.band_gains_array) {
+          _refParamsObj.band_gains_array = JSON.stringify(_refParamsObj.band_gains_array);
+        }
+        const params = new URLSearchParams(_refParamsObj);
+
+        try {
+          const url = `${API()}/master/reference?${params.toString()}`;
+          const res = await fetch(url, { method: "POST", body: fd });
+          if (!res.ok) {
+            const text = await res.text();
+            throw new Error(`HTTP ${res.status}: ${text}`);
+          }
+          const data = await res.json();
+          currentJobId = data.job_id;
+          showStatus(null, `Job ${currentJobId.slice(0, 8)}… en cola (matching por referencia)`, "queued");
+          startReferencePolling(currentJobId);
+        } catch (e) {
+          console.error("❌ Error al enviar (referencia):", e);
+          showStatus(null, "Error: " + e.message, "error");
+          document.getElementById("btnMasterRef").disabled = false;
+        }
+      }
+
+      // ── Sistema dinámico de bandas EQ (refBandEQ) ─────────────────────────────
+      // Genera N sliders logarítmicamente espaciados entre 20 Hz y 20 kHz.
+      // Al cambiar la cantidad, interpola los valores anteriores.
+      // Expone: window.refBandEQ.getGainsArray() → [{freq_hz, gain_db}, ...]
+      window.refBandEQ = (function() {
+        const CONTAINER   = document.getElementById("ref-band-controls");
+        const COUNT_SLIDER = document.getElementById("s-band-count");
+        const COUNT_VAL    = document.getElementById("v-band-count");
+        const RESET_BTN    = document.getElementById("btn-band-reset");
+        const MIN_HZ = 20, MAX_HZ = 20000;
+
+        // Estado actual: array de {freq_hz, gain_db}
+        let _bands = [];
+
+        // Genera N frecuencias logarítmicas entre MIN_HZ y MAX_HZ
+        function _logFreqs(n) {
+          return Array.from({length: n}, (_, i) =>
+            MIN_HZ * Math.pow(MAX_HZ / MIN_HZ, i / (n - 1))
+          );
+        }
+
+        // Interpola linealmente: dado oldBands [{freq_hz,gain_db}], devuelve gains para newFreqs
+        function _interpolate(oldBands, newFreqs) {
+          if (!oldBands.length) return newFreqs.map(() => 0);
+          return newFreqs.map(f => {
+            // Encuentra los dos vecinos más cercanos en escala log
+            const logF = Math.log10(f);
+            const logFs = oldBands.map(b => Math.log10(b.freq_hz));
+            // Caso fuera de rango: extender el extremo
+            if (logF <= logFs[0])  return oldBands[0].gain_db;
+            if (logF >= logFs[logFs.length-1]) return oldBands[logFs.length-1].gain_db;
+            // Interpolación lineal en escala log
+            for (let i = 0; i < logFs.length - 1; i++) {
+              if (logF >= logFs[i] && logF <= logFs[i+1]) {
+                const t = (logF - logFs[i]) / (logFs[i+1] - logFs[i]);
+                return oldBands[i].gain_db * (1-t) + oldBands[i+1].gain_db * t;
+              }
+            }
+            return 0;
+          });
+        }
+
+        // Formatea Hz en string legible
+        function _fmtHz(hz) {
+          if (hz >= 1000) return (hz/1000).toFixed(hz >= 10000 ? 0 : 1) + " kHz";
+          return Math.round(hz) + " Hz";
+        }
+
+        // Renderiza los sliders en el contenedor
+        function _render(n, interpolatedGains) {
+          const freqs = _logFreqs(n);
+          CONTAINER.innerHTML = "";
+          _bands = [];
+
+          freqs.forEach((freq, i) => {
+            const gain = interpolatedGains ? Math.round(interpolatedGains[i] * 2) / 2 : 0;
+            _bands.push({ freq_hz: freq, gain_db: gain });
+
+            const div = document.createElement("div");
+            div.className = "param";
+            div.style.marginBottom = n > 14 ? "0.05rem" : "0.1rem";
+
+            const valId  = "dyn-band-val-"  + i;
+            const slId   = "dyn-band-sl-"   + i;
+            const gainStr = (gain >= 0 ? "+" : "") + gain.toFixed(1) + " dB";
+
+            div.innerHTML = `
+              <label style="font-size:${n > 14 ? '0.62rem' : '0.68rem'}">
+                ${_fmtHz(freq)}
+              </label>
+              <span class="val" id="${valId}" style="font-size:${n > 14 ? '0.62rem' : '0.68rem'}">${gainStr}</span>
+              <input type="range" id="${slId}" min="-12" max="12" step="0.5" value="${gain}"
+                style="${n > 14 ? 'height:3px;' : ''}" />
+            `;
+            CONTAINER.appendChild(div);
+
+            // Sync label + update internal state + emit event
+            const sl  = div.querySelector("input");
+            const val = div.querySelector("span.val");
+            sl.addEventListener("input", () => {
+              const v = parseFloat(sl.value);
+              _bands[i].gain_db = v;
+              val.textContent = (v >= 0 ? "+" : "") + v.toFixed(1) + " dB";
+              // Emitir evento custom para que el preview lo capture
+              CONTAINER.dispatchEvent(new CustomEvent("bandchange", { bubbles: true }));
+            });
+          });
+        }
+
+        // Cambia la cantidad de bandas interpolando los valores actuales
+        function setBandCount(n, skipInterp) {
+          const newFreqs = _logFreqs(n);
+          const gains = skipInterp ? null : _interpolate(_bands, newFreqs);
+          _render(n, gains);
+          COUNT_VAL.textContent = n;
+        }
+
+        // Init con 7 bandas sin interpolar
+        setBandCount(7, true);
+
+        // Slider de cantidad
+        COUNT_SLIDER.addEventListener("input", () => {
+          const n = parseInt(COUNT_SLIDER.value);
+          setBandCount(n, false);
+          // Si el preview está activo, relanzarlo con debounce
+          CONTAINER.dispatchEvent(new CustomEvent("bandchange", { bubbles: true }));
+        });
+
+        // Reset
+        RESET_BTN.addEventListener("click", () => {
+          const n = parseInt(COUNT_SLIDER.value);
+          setBandCount(n, true);
+          CONTAINER.dispatchEvent(new CustomEvent("bandchange", { bubbles: true }));
+        });
+
+        // API pública
+        return {
+          getGainsArray() {
+            return _bands.map(b => ({ freq_hz: Math.round(b.freq_hz * 10) / 10, gain_db: b.gain_db }));
+          },
+          getBandCount() {
+            return _bands.length;
+          }
+        };
+      })();
+
+      // ── Preview en tiempo real con referencia ───────────────────────────────────
+      (function() {
+        let refWs = null;
+        let refAudioCtx = null;
+        let refSessionId = null;
+        let refRefSessionId = null;
+        let refSrcUploaded = false;
+        let refRefUploaded = false;
+        let debounceTimer = null;
+
+        // Habilitar btn preview cuando hay ambos archivos
+        function updateRefPreviewBtn() {
+          const ok = !!(selectedFile && selectedRefFile);
+          const btn = document.getElementById("btnRefPreview");
+          if (btn) btn.disabled = !ok;
+        }
+
+        // Observer para selectedFile / selectedRefFile (se llama desde el código existente)
+        // Usamos un MutationObserver sobre btnMasterRef (que ya se deshabilita/habilita igual)
+        const _orig5948 = setInterval(() => {
+          updateRefPreviewBtn();
+        }, 800);
+
+        // ── Dibujar espectro 32 bandas ──────────────────────────────────────
+        function drawSpectrum(bands_db) {
+          const canvas = document.getElementById("refSpectrumCanvas");
+          if (!canvas) return;
+          const ctx = canvas.getContext("2d");
+          const W = canvas.width, H = canvas.height;
+          ctx.clearRect(0, 0, W, H);
+          const N = bands_db.length;
+          const BAR_W = W / N;
+          const MIN_DB = -80, MAX_DB = 0;
+          for (let i = 0; i < N; i++) {
+            const db = Math.max(MIN_DB, Math.min(MAX_DB, bands_db[i]));
+            const h = ((db - MIN_DB) / (MAX_DB - MIN_DB)) * H;
+            // Color: azul cyan → verde para las bandas más fuertes
+            const t = h / H;
+            const r = Math.round(6 + t * 50);
+            const g = Math.round(182 + t * 60);
+            const b = Math.round(212 - t * 80);
+            ctx.fillStyle = `rgb(${r},${g},${b})`;
+            ctx.fillRect(i * BAR_W + 1, H - h, BAR_W - 1, h);
+          }
+        }
+
+        // ── Dibujar curva EQ de matching ────────────────────────────────────
+        function drawEqCurve(curve) {
+          const wrap = document.getElementById("refEqCurveWrap");
+          const canvas = document.getElementById("refEqCurveCanvas");
+          if (!wrap || !canvas || !curve || !curve.length) return;
+          wrap.style.display = "block";
+          const ctx = canvas.getContext("2d");
+          const W = canvas.width, H = canvas.height;
+          ctx.clearRect(0, 0, W, H);
+          // Zero line
+          const ZERO_Y = H / 2;
+          ctx.strokeStyle = "rgba(255,255,255,0.1)";
+          ctx.beginPath(); ctx.moveTo(0, ZERO_Y); ctx.lineTo(W, ZERO_Y); ctx.stroke();
+          // Curve
+          const gains = curve.map(p => p.gain_db);
+          const MAX_G = Math.max(6, ...gains.map(Math.abs));
+          ctx.beginPath();
+          ctx.strokeStyle = "var(--accent2, #06b6d4)";
+          ctx.lineWidth = 1.5;
+          curve.forEach((p, i) => {
+            const x = (i / (curve.length - 1)) * W;
+            const y = ZERO_Y - (p.gain_db / MAX_G) * (H * 0.42);
+            i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+          });
+          ctx.stroke();
+        }
+
+        // ── Métricas inline ──────────────────────────────────────────────────
+        function updateMetrics(m) {
+          const set = (id, v) => { const el = document.getElementById(id); if(el) el.textContent = v; };
+          set("rp-lufs", m.lufs_momentary != null ? m.lufs_momentary.toFixed(1) + " LUFS" : "--");
+          set("rp-peak", m.peak_db != null ? m.peak_db.toFixed(1) + " dBFS" : "--");
+          set("rp-rms",  m.rms_db  != null ? m.rms_db.toFixed(1) + " dB" : "--");
+          set("rp-corr", m.stereo_correlation != null ? m.stereo_correlation.toFixed(2) : "--");
+          if (m.spectrum && m.spectrum.bands_db) drawSpectrum(m.spectrum.bands_db);
+        }
+
+        // ── AudioContext: reproducir PCM16 en tiempo real ────────────────────
+        function initAudioCtx() {
+          if (!refAudioCtx || refAudioCtx.state === "closed") {
+            refAudioCtx = new (window.AudioContext || window.webkitAudioContext)();
+          }
+          if (refAudioCtx.state === "suspended") refAudioCtx.resume();
+          return refAudioCtx;
+        }
+
+        let _playTime = 0;
+        let _refPreviewActive = false; // BUGFIX Bug 4: flag para evitar scheduling tras un stop()
+        function scheduleChunk(pcmBytes, sr, channels) {
+          // BUGFIX Bug 4: si el preview fue detenido mientras el chunk estaba
+          // en vuelo (race condition WS → stop → scheduleChunk), ignorar.
+          if (!_refPreviewActive) return;
+          const actx = initAudioCtx();
+          // Backend envía float32 interleaved (4 bytes/sample)
+          const samples = pcmBytes.byteLength / 4 / channels;
+          const buf = actx.createBuffer(channels, samples, sr);
+          const f32 = new Float32Array(pcmBytes);
+          for (let ch = 0; ch < channels; ch++) {
+            const chData = buf.getChannelData(ch);
+            for (let i = 0; i < samples; i++) {
+              chData[i] = f32[i * channels + ch];
+            }
+          }
+          const src = actx.createBufferSource();
+          src.buffer = buf;
+          src.connect(actx.destination);
+          const now = actx.currentTime;
+          if (_playTime < now) _playTime = now + 0.05; // pequeño buffer inicial
+          src.start(_playTime);
+          _playTime += buf.duration;
+        }
+
+        // ── Cerrar WS activo ─────────────────────────────────────────────────
+        function stopRefPreview() {
+          _refPreviewActive = false; // BUGFIX Bug 4: deshabilita scheduleChunk antes de cerrar WS
+          if (refWs) {
+            try { refWs.close(); } catch(e) {}
+            refWs = null;
+          }
+          // BUGFIX Bug 4: cerrar el AudioContext del ref-preview para que
+          // su _playTime no colisione con el main preview si ambos usan
+          // el mismo contexto de audio. Se recrea limpio en el próximo
+          // launchRefPreview() via initAudioCtx().
+          if (refAudioCtx && refAudioCtx.state !== "closed") {
+            try { refAudioCtx.close(); } catch(e) {}
+            refAudioCtx = null;
+          }
+          _playTime = 0;
+          const status = document.getElementById("rp-status");
+          if (status) status.textContent = "";
+        }
+
+        // ── Lanzar / relanzar el preview ─────────────────────────────────────
+        async function launchRefPreview() {
+          stopRefPreview(); // pone _refPreviewActive = false, cierra AudioCtx
+
+          const panel = document.getElementById("refPreviewPanel");
+          if (panel) panel.style.display = "block";
+
+          if (!selectedFile || !selectedRefFile) return;
+
+          // session IDs estables por archivo (igual que el WS de mastering normal)
+          if (!refSessionId) refSessionId = genUUID();
+          if (!refRefSessionId) refRefSessionId = genUUID();
+
+          const status = document.getElementById("rp-status");
+          if (status) status.textContent = "Conectando…";
+
+          const params = collectReferenceParamsObj();
+          const band_gains_array = window.refBandEQ ? window.refBandEQ.getGainsArray() : [];
+
+          const wsUrl = API().replace(/^http/, "ws") + "/ws/ref-stream";
+          refWs = new WebSocket(wsUrl);
+          refWs.binaryType = "arraybuffer";
+
+          let expectingRef = false;
+          let wsChannels = 2, wsSr = 44100;
+          let pendingMetrics = null;
+
+          refWs.onopen = () => {
+            refWs.send(JSON.stringify({
+              session_id:     refSessionId,
+              ref_session_id: refRefSessionId,
+              chunk_seconds:  2.0,
+              eq_bands:       parseInt(params.eq_bands || 28),
+              eq_max_boost_db: parseFloat(params.eq_max_boost_db || 6),
+              eq_max_cut_db:   parseFloat(params.eq_max_cut_db || -9),
+              eq_q:            parseFloat(params.eq_q || 1.3),
+              eq_match_blend:  parseFloat(params.eq_match_blend || 0.75),
+              eq_fit_method:   params.eq_fit_method || "heuristic",
+              ms_eq_matching:  params.ms_eq_matching !== false,
+              band_gains_array,
+            }));
+          };
+
+          refWs.onmessage = async (evt) => {
+            if (evt.data instanceof ArrayBuffer) {
+              scheduleChunk(evt.data, wsSr, wsChannels);
+              if (pendingMetrics) { updateMetrics(pendingMetrics); pendingMetrics = null; }
+              return;
+            }
+            const msg = JSON.parse(evt.data);
+
+            if (msg.event === "need_upload") {
+              _refPreviewActive = true; // BUGFIX Bug 4: activar antes de upload
+              if (status) status.textContent = "Subiendo track…";
+              const buf = await selectedFile.arrayBuffer();
+              refWs.send(buf);
+              refWs.send(JSON.stringify({ event: "upload_complete" }));
+
+            } else if (msg.event === "use_cache") {
+              _refPreviewActive = true; // BUGFIX Bug 4
+              refWs.send(JSON.stringify({ event: "params_only" }));
+
+            } else if (msg.event === "need_upload_ref") {
+              if (status) status.textContent = "Subiendo referencia…";
+              const buf = await selectedRefFile.arrayBuffer();
+              refWs.send(buf);
+              refWs.send(JSON.stringify({ event: "upload_complete" }));
+
+            } else if (msg.event === "use_cache_ref") {
+              refWs.send(JSON.stringify({ event: "params_only" }));
+
+            } else if (msg.event === "analyzing") {
+              if (status) status.textContent = msg.message || "Analizando…";
+
+            } else if (msg.event === "matching_ready") {
+              if (status) status.textContent = "▶ Reproduciendo preview…";
+              drawEqCurve(msg.eq_curve);
+
+            } else if (msg.event === "chunk") {
+              wsChannels = msg.channels || 2;
+              wsSr       = msg.sample_rate || 44100;
+              pendingMetrics = msg.metrics;
+
+            } else if (msg.event === "done") {
+              if (status) status.textContent = "✓ Preview completado";
+
+            } else if (msg.event === "error") {
+              if (status) status.textContent = "Error: " + msg.message;
+            }
+          };
+
+          refWs.onerror = () => {
+            if (status) status.textContent = "Error de conexión WebSocket.";
+          };
+          refWs.onclose = () => {
+            if (status && status.textContent === "▶ Reproduciendo preview…")
+              status.textContent = "";
+          };
+        }
+
+        // ── Debounce al mover sliders de banda ───────────────────────────────
+        function debouncedPreview() {
+          if (!refWs) return; // solo relanzo si el preview estaba activo
+          clearTimeout(debounceTimer);
+          debounceTimer = setTimeout(() => launchRefPreview(), 420);
+        }
+
+        // Enganchar debounce a los sliders dinámicos de banda
+        // refBandEQ emite el evento custom "bandchange" en el contenedor cuando cambia cualquier slider
+        document.getElementById("ref-band-controls").addEventListener("bandchange", debouncedPreview);
+
+        // ── Botones ──────────────────────────────────────────────────────────
+        document.getElementById("btnRefPreview").addEventListener("click", () => {
+          // Resetear session IDs para forzar re-upload si cambió el archivo
+          if (!refSrcUploaded)  refSessionId    = genUUID();
+          if (!refRefUploaded)  refRefSessionId = genUUID();
+          refSrcUploaded = refRefUploaded = true;
+          launchRefPreview();
+        });
+
+        document.getElementById("btnRefPreviewStop").addEventListener("click", () => {
+          stopRefPreview();
+          const panel = document.getElementById("refPreviewPanel");
+          if (panel) panel.style.display = "none";
+        });
+
+        // Cuando cambia el archivo propio, invalidar caché
+        const _origSel = window._onFileSelected;
+        window._onFileSelectedRef = () => {
+          refSessionId = null;
+          refSrcUploaded = false;
+          updateRefPreviewBtn();
+        };
+        // Cuando cambia la referencia, invalidar caché de referencia
+        window._onRefFileSelectedRef = () => {
+          refRefSessionId = null;
+          refRefUploaded = false;
+          updateRefPreviewBtn();
+        };
+
+      })();
+
+      document.getElementById("btnMasterRef").addEventListener("click", () => {
+        if (!selectedFile || !selectedRefFile) {
+          showStatus(null, "Seleccioná tu track y un track de referencia", "error");
+          return;
+        }
+        clearResults();
+        const paramsObj = collectReferenceParamsObj();
+        const panel = document.createElement("div");
+        panel.className = "params-preview";
+        let html = `<h3>🔎 Parámetros corregidos — matching por referencia</h3><div class="pp-group"><div class="pp-grid">`;
+        Object.entries(paramsObj).forEach(([k, v]) => {
+          html += `<div class="pp-item"><span>${REF_PARAM_LABELS[k] || k}</span><span>${formatParamValue(v, k)}</span></div>`;
+        });
+        html += `</div></div><div class="pp-actions">
+    <button class="btn btn-secondary" id="ppRefCancelBtn">✕ Cancelar</button>
+    <button class="btn btn-primary" id="ppRefConfirmBtn">✅ Confirmar y masterizar</button>
+  </div>`;
+        panel.innerHTML = html;
+        getContent().prepend(panel);
+        panel.querySelector("#ppRefConfirmBtn").addEventListener("click", () => {
+          panel.remove();
+          submitReferenceMasterJob();
+        });
+        panel.querySelector("#ppRefCancelBtn").addEventListener("click", () => panel.remove());
+      });
+
+      function startReferencePolling(jobId) {
+        if (pollInterval) clearInterval(pollInterval);
+        pollInterval = setInterval(async () => {
+          try {
+            const res = await fetch(`${API()}/job/${jobId}`);
+            const data = await res.json();
+            if (data.status === "queued") {
+              showStatus(null, "En cola…", "queued", data.progress, data.stage);
+            } else if (data.status === "processing") {
+              showStatus(null, "Masterizando por referencia…", "processing", data.progress, data.stage);
+            } else if (data.status === "done") {
+              clearInterval(pollInterval);
+              showStatus(null, "Masterizado por referencia ✓", "done");
+              document.getElementById("btnMasterRef").disabled = false;
+              downloadUrl = `${API()}/download/${jobId}`;
+              const btn = document.getElementById("btnDownload");
+              btn.style.display = "block";
+              const nameInput = document.getElementById("trackNameInput");
+              nameInput.style.display = "block";
+              prefillTrackNameFromFile();
+              btn.onclick = () => window.open(downloadUrl + currentTrackNameParam(), "_blank");
+              const rBtn = document.getElementById("btnReport");
+              rBtn.style.display = "block";
+              rBtn.onclick = () => downloadReport(jobId);
+              if (data.analysis_before?.lufs != null)
+                showLoudnessMeter(data.analysis_after?.lufs ?? data.analysis_before.lufs);
+              if (data.reference_match) renderReferenceMatch(data.reference_match, data.analysis_reference, data.analysis_after);
+              renderAnalysisComparison(data.analysis_before, data.analysis_after);
+              if (data.analysis_reference?.fft_spectrum && data.analysis_after?.fft_spectrum) {
+                renderFFT([
+                  { label: "Referencia", data: data.analysis_reference.fft_spectrum, color: "var(--accent2)" },
+                  { label: "Resultado", data: data.analysis_after.fft_spectrum, color: "var(--yellow)" },
+                ]);
+              }
+              if (data.mix_advice_after) renderAdvicePanel(data.mix_advice_after, "Evaluación", "— Resultado");
+              // BUGFIX: mismo problema que en el mastering normal — sin esto Laia
+              // quedaba hablando con datos viejos (o sin análisis) del resultado
+              // masterizado por referencia.
+              if (data.analysis_after) setAiContext({ ...data.analysis_after, mix_advice: data.mix_advice_after });
+            } else if (data.status === "error") {
+              clearInterval(pollInterval);
+              showStatus(null, "Error: " + data.error, "error");
+              document.getElementById("btnMasterRef").disabled = false;
+            }
+          } catch (e) {
+            console.error("Poll error (referencia):", e);
+          }
+        }, 1500);
+      }
+
+      // Barra horizontal simple: valor propio vs. valor de referencia, con un
+      // ✓/⚠ según qué tan cerca terminaron (para featurizar visualmente lo
+      // que antes solo se leía como número/texto plano).
+      function _matchBarRow(label, ownVal, refVal, unit, closeThresholdAbs, fmt) {
+        fmt = fmt || ((v) => v);
+        if (ownVal == null || refVal == null) return "";
+        const diff = Math.abs(ownVal - refVal);
+        const ok = diff <= closeThresholdAbs;
+        const lo = Math.min(ownVal, refVal, 0) - Math.abs(refVal || 1) * 0.15;
+        const hi = Math.max(ownVal, refVal, 0) + Math.abs(refVal || 1) * 0.15;
+        const range = hi - lo || 1;
+        const ownPct = Math.max(0, Math.min(100, ((ownVal - lo) / range) * 100));
+        const refPct = Math.max(0, Math.min(100, ((refVal - lo) / range) * 100));
+        return `
+    <div class="match-bar-row">
+      <div class="match-bar-label">${ok ? "✓" : "⚠"} ${label}</div>
+      <div class="match-bar-track">
+        <div class="match-bar-marker match-bar-ref" style="left:${refPct}%" title="Referencia: ${fmt(refVal)}${unit}"></div>
+        <div class="match-bar-fill" style="width:${ownPct}%"></div>
+      </div>
+      <div class="match-bar-values">${fmt(ownVal)}${unit} <span style="opacity:.55">vs ref ${fmt(refVal)}${unit}</span></div>
+    </div>`;
+      }
+
+      // ── Análisis detallado de referencia ───────────────────────────────────────
+      function renderReferenceAnalysisPanel(refAnalysis, ownAnalysis, rm) {
+        if (!refAnalysis) return '';
+        const spec = refAnalysis.spectrum || {};
+        const ownSpec = (ownAnalysis || {}).spectrum || {};
+        // Spectral bands with labels, ref value, src value
+        const SPEC_BANDS = [
+          { key: 'sub_bass',    label: 'Sub-graves',  range: '20–80 Hz' },
+          { key: 'bass',        label: 'Graves',       range: '80–250 Hz' },
+          { key: 'low_mid',     label: 'Low-Mid',      range: '250–800 Hz' },
+          { key: 'mid',         label: 'Medios',       range: '800–2.5k' },
+          { key: 'high_mid',    label: 'High-Mid',     range: '2.5–6 kHz' },
+          { key: 'presence',    label: 'Presencia',    range: '6–12 kHz' },
+          { key: 'air',         label: 'Aire',         range: '12–20 kHz' },
+        ];
+        // Normalize to make the highest ref band = 100%
+        const refVals = SPEC_BANDS.map(b => spec[b.key] ?? -60);
+        const maxRef = Math.max(...refVals, -60);
+        const minRef = Math.min(...refVals, -80);
+        const range = maxRef - minRef || 1;
+
+        const specBarsHtml = SPEC_BANDS.map((b, i) => {
+          const rv = spec[b.key] ?? null;
+          const sv = ownSpec[b.key] ?? null;
+          if (rv === null) return '';
+          const refPct = Math.max(4, ((rv - minRef) / range) * 100);
+          const srcPct = sv !== null ? Math.max(4, ((sv - minRef) / range) * 100) : null;
+          const diff = sv !== null ? (rv - sv) : null;
+          const diffStr = diff !== null ? (diff >= 0 ? `+${diff.toFixed(1)}` : diff.toFixed(1)) + ' dB' : '';
+          const diffColor = diff === null ? '' : Math.abs(diff) < 2 ? 'var(--green,#3c6)' : Math.abs(diff) < 5 ? 'var(--amber,#fa0)' : 'var(--red,#e05)';
+          return `<div style="margin-bottom:.45rem">
+            <div style="display:flex;justify-content:space-between;font-size:.68rem;margin-bottom:.15rem">
+              <span><b>${b.label}</b> <span style="color:var(--muted)">${b.range}</span></span>
+              <span style="color:${diffColor};font-family:var(--mono)">${diffStr}</span>
+            </div>
+            <div style="position:relative;height:8px;background:var(--surface2,#1a1a2e);border-radius:4px;overflow:hidden">
+              ${srcPct !== null ? `<div style="position:absolute;left:0;top:0;height:100%;width:${srcPct.toFixed(1)}%;background:var(--accent,#7c3aed);opacity:.45;border-radius:4px"></div>` : ''}
+              <div style="position:absolute;left:0;top:0;height:100%;width:${refPct.toFixed(1)}%;background:var(--accent2,#06b6d4);opacity:.75;border-radius:4px"></div>
+            </div>
+          </div>`;
+        }).join('');
+
+        // Dynamic metrics comparison
+        const dynMetrics = [
+          { label: 'RMS',          ownVal: ownAnalysis?.rms_db,             refVal: refAnalysis.rms_db,             unit: ' dB', fmt: v=>v.toFixed(1) },
+          { label: 'Pico',         ownVal: ownAnalysis?.peak_db,            refVal: refAnalysis.peak_db,            unit: ' dBFS', fmt: v=>v.toFixed(1) },
+          { label: 'Crest Factor', ownVal: ownAnalysis?.crest_factor_db,    refVal: refAnalysis.crest_factor_db,    unit: ' dB', fmt: v=>v.toFixed(1) },
+          { label: 'LRA',          ownVal: ownAnalysis?.lra,                refVal: refAnalysis.lra,                unit: ' LU', fmt: v=>v?.toFixed(1) ?? '--' },
+          { label: 'LUFS',         ownVal: ownAnalysis?.lufs,               refVal: refAnalysis.lufs,               unit: ' LUFS', fmt: v=>v.toFixed(1) },
+        ];
+        const dynRows = dynMetrics.map(m => {
+          if (m.refVal == null) return '';
+          const diff = m.ownVal != null ? (m.refVal - m.ownVal) : null;
+          const dc = diff === null ? '' : Math.abs(diff) < 1 ? 'var(--green,#3c6)' : Math.abs(diff) < 3 ? 'var(--amber,#fa0)' : 'var(--red,#e05)';
+          return `<div style="display:flex;justify-content:space-between;font-size:.72rem;padding:.18rem 0;border-bottom:1px solid var(--border)">
+            <span style="color:var(--muted)">${m.label}</span>
+            <span><span style="color:var(--accent,#7c3aed)">${m.ownVal != null ? m.fmt(m.ownVal) + m.unit : '--'}</span>
+            <span style="color:var(--muted);padding:0 .25rem">→</span>
+            <span style="color:var(--accent2,#06b6d4)">${m.fmt(m.refVal)}${m.unit}</span>
+            ${diff !== null ? `<span style="color:${dc};margin-left:.35rem;font-family:var(--mono)">(${diff >= 0 ? '+' : ''}${diff.toFixed(1)})</span>` : ''}
+            </span>
+          </div>`;
+        }).join('');
+
+        // Stereo analysis
+        const ownCorr = ownAnalysis?.stereo_correlation ?? null;
+        const refCorr = refAnalysis.stereo_correlation ?? null;
+        const stereoRow = (ownCorr !== null && refCorr !== null)
+          ? `<div style="display:flex;justify-content:space-between;font-size:.72rem;padding:.18rem 0">
+              <span style="color:var(--muted)">Correlación estéreo</span>
+              <span><span style="color:var(--accent,#7c3aed)">${ownCorr.toFixed(2)}</span>
+              <span style="color:var(--muted);padding:0 .25rem">→</span>
+              <span style="color:var(--accent2,#06b6d4)">${refCorr.toFixed(2)}</span></span>
+             </div>` : '';
+
+        // Band gains applied summary
+        const bg = rm?.band_gains_applied || {};
+        const BAND_LABELS = { sub:'Sub', bass:'Graves', low_mid:'Low-Mid', mid:'Medios', high_mid:'High-Mid', presence:'Presencia', air:'Aire' };
+        const bgApplied = Object.entries(bg).filter(([k,v]) => Math.abs(v) >= 0.1);
+        const bgHtml = bgApplied.length ? `<div style="margin-top:.5rem;font-size:.68rem;color:var(--muted)">Ajustes manuales aplicados: ${
+          bgApplied.map(([k,v]) => `<span style="color:${v>0?'var(--green,#3c6)':'var(--red,#e05)'}"><b>${BAND_LABELS[k]||k}</b> ${v>0?'+':''}${v.toFixed(1)} dB</span>`).join(' · ')
+        }</div>` : '';
+
+        // M/S EQ curves visualization
+        const msEqHtml = (rm && rm.eq_curve_mid_db && rm.ms_eq_matching) ? (() => {
+          // Draw after DOM insertion via requestAnimationFrame
+          setTimeout(() => {
+            const cv = document.getElementById('refMsEqCanvas');
+            if (!cv) return;
+            const ctx = cv.getContext('2d');
+            const W = cv.width, H = cv.height, ZERO = H / 2;
+            ctx.clearRect(0, 0, W, H);
+            ctx.strokeStyle = 'rgba(255,255,255,0.08)';
+            ctx.beginPath(); ctx.moveTo(0, ZERO); ctx.lineTo(W, ZERO); ctx.stroke();
+            [[rm.eq_curve_mid_db, 'var(--accent2,#06b6d4)'],
+             [rm.eq_curve_side_db, 'var(--accent,#7c3aed)']].forEach(([curve, color]) => {
+              if (!curve || !curve.length) return;
+              const gains = curve.map(p => p.gain_db);
+              const maxG = Math.max(6, ...gains.map(Math.abs));
+              ctx.beginPath(); ctx.strokeStyle = color; ctx.lineWidth = 1.5;
+              curve.forEach((p, i) => {
+                const x = (i / (curve.length - 1)) * W;
+                const y = ZERO - (p.gain_db / maxG) * (H * 0.42);
+                i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+              });
+              ctx.stroke();
+            });
+          }, 80);
+          return `<div style="margin-top:.5rem">
+            <div style="font-size:.7rem;color:var(--muted);text-transform:uppercase;letter-spacing:.07em;margin-bottom:.2rem">Curvas EQ M/S</div>
+            <div style="display:flex;gap:.6rem;font-size:.65rem;color:var(--muted);margin-bottom:.2rem">
+              <span><span style="display:inline-block;width:10px;height:2px;background:var(--accent2,#06b6d4);vertical-align:middle;margin-right:.2rem"></span>Mid</span>
+              <span><span style="display:inline-block;width:10px;height:2px;background:var(--accent,#7c3aed);vertical-align:middle;margin-right:.2rem"></span>Side</span>
+            </div>
+            <canvas id="refMsEqCanvas" width="320" height="55" style="width:100%;height:55px;background:var(--surface2,#0d0d1a);border-radius:5px;display:block"></canvas>
+          </div>`;
+        })() : '';
+
+        return `<details style="margin-top:.9rem" open>
+          <summary style="font-size:.73rem;color:var(--muted);cursor:pointer;user-select:none;letter-spacing:.05em;text-transform:uppercase">
+            📊 Análisis detallado de la referencia
+          </summary>
+          <div style="margin-top:.55rem">
+            <div style="font-size:.68rem;color:var(--muted);margin-bottom:.35rem;display:flex;gap:.8rem">
+              <span><span style="display:inline-block;width:10px;height:10px;border-radius:2px;background:var(--accent2,#06b6d4);opacity:.8;margin-right:.3rem"></span>Referencia</span>
+              <span><span style="display:inline-block;width:10px;height:10px;border-radius:2px;background:var(--accent,#7c3aed);opacity:.5;margin-right:.3rem"></span>Original</span>
+            </div>
+            <div style="font-size:.7rem;color:var(--muted);text-transform:uppercase;letter-spacing:.07em;margin-bottom:.3rem">Espectro por banda (energía relativa)</div>
+            ${specBarsHtml}
+            <div style="font-size:.7rem;color:var(--muted);text-transform:uppercase;letter-spacing:.07em;margin:.55rem 0 .2rem">Dinámica comparada</div>
+            ${dynRows}
+            ${stereoRow}
+            ${bgHtml}
+          </div>
+        </details>`;
+      }
+
+      function renderReferenceMatch(rm, refAnalysis, ownAnalysis) {
+        const panel = document.createElement("div");
+        panel.className = "ref-match-panel";
+        const pct = rm.after?.match_percent ?? 0;
+        const report = rm.intelligent_report || {};
+        const dynBands = rm.dynamics_by_band || {};
+        const stereoBands = rm.stereo_width_by_band || {};
+        const lra = rm.lra || {};
+
+        // Progresión del match tonal en las 3 etapas (antes → tras EQ → final)
+        // como mini-barras, en vez de solo texto con flechas.
+        const stages = [
+          { label: "Antes", v: rm.before?.match_percent },
+          { label: "Tras EQ", v: rm.after_eq?.match_percent },
+          { label: "Final", v: pct },
+        ];
+        const stageBars = stages
+          .map(
+            (s) => `
+    <div class="match-stage-col">
+      <div class="match-stage-bar-track"><div class="match-stage-bar-fill" style="height:${Math.max(2, s.v ?? 0)}%"></div></div>
+      <div class="match-stage-pct">${s.v ?? "--"}%</div>
+      <div class="match-stage-label">${s.label}</div>
+    </div>`
+          )
+          .join("");
+
+        const dynRows = ["low", "mid", "high"]
+          .map((name) => {
+            const b = dynBands[name];
+            if (!b) return "";
+            const label = name === "low" ? "Graves" : name === "mid" ? "Medios" : "Agudos";
+            if (b.own_crest_db == null) {
+              const text = b.applied
+                ? `comprimida (gap ${b.gap_db} dB, ratio ${b.ratio}:1)`
+                : `sin cambios (gap ${b.gap_db} dB)`;
+              return `<div class="ref-match-step">${label}: <b>${text}</b></div>`;
+            }
+            return _matchBarRow(
+              `${label} (crest factor)`, b.own_crest_db, b.ref_crest_db, " dB", 1.5,
+              (v) => v.toFixed(1)
+            );
+          })
+          .join("");
+
+        const stereoRows = ["low", "mid", "high"]
+          .map((name) => {
+            const k = stereoBands[name];
+            if (k === undefined) return "";
+            const label = name === "low" ? "Graves" : name === "mid" ? "Medios" : "Agudos";
+            // k=1.0 significa "no se tocó el ancho" — se visualiza como barra
+            // centrada en 1.0 (izquierda = más angosto, derecha = más ancho).
+            const pctBar = Math.max(0, Math.min(100, ((k - 0.5) / 1.0) * 100));
+            const ok = Math.abs(k - 1.0) < 0.35;
+            return `
+    <div class="match-bar-row">
+      <div class="match-bar-label">${ok ? "✓" : "↔"} ${label}</div>
+      <div class="match-bar-track">
+        <div class="match-bar-marker match-bar-ref" style="left:50%" title="Sin cambio de ancho"></div>
+        <div class="match-bar-fill" style="width:${pctBar}%"></div>
+      </div>
+      <div class="match-bar-values">factor ${k.toFixed(2)}x</div>
+    </div>`;
+          })
+          .join("");
+
+        const lraText = lra.applied
+          ? `LRA ${lra.own_lra} → acercado a ${lra.ref_lra} LU (ratio ${lra.ratio}:1)`
+          : `LRA propio: ${lra.own_lra ?? "--"} LU · referencia: ${lra.ref_lra ?? "--"} LU`;
+
+        const loudnessBar = _matchBarRow(
+          "Loudness (LUFS)", ownAnalysis?.lufs, refAnalysis?.lufs, " LUFS", 0.5, (v) => v.toFixed(1)
+        );
+
+        const tipsHtml = (report.tips || []).map((t) => `<li>${t}</li>`).join("");
+        const issuesHtml = (report.issues || []).map((t) => `<li style="color:var(--red,#e05)">${t}</li>`).join("");
+
+        panel.innerHTML = `
+    <h3>🎯 Match con referencia</h3>
+    <div class="ref-match-score-row">
+      <div class="ref-match-score-circle"><span class="score-num">${pct}%</span><span class="score-label">MATCH TONAL</span></div>
+      <div class="match-stage-cols">${stageBars}</div>
+      <div>
+        ${report.overall_score !== undefined ? `<div style="font-size:.8rem;margin-top:.3rem">Puntaje inteligente general: <b>${report.overall_score}/100 (${report.grade})</b></div>` : ""}
+      </div>
+    </div>
+    <div style="margin-top:.7rem;font-size:.75rem;color:var(--muted);text-transform:uppercase;letter-spacing:.08em">Loudness</div>
+    ${loudnessBar}
+    <div class="ref-match-steps">
+      <div class="ref-match-step">Ganancia aplicada: <b>${rm.loudness_gain_applied_db >= 0 ? "+" : ""}${rm.loudness_gain_applied_db} dB</b></div>
+      <div class="ref-match-step">Techo limiter: <b>${(20 * Math.log10(rm.limiter_ceiling)).toFixed(2)} dBFS</b></div>
+      <div class="ref-match-step" style="flex-basis:100%">${lraText}</div>
+    </div>
+    <div style="margin-top:.7rem;font-size:.75rem;color:var(--muted);text-transform:uppercase;letter-spacing:.08em">Dinámica por banda (crest factor propio vs. referencia)</div>
+    ${dynRows}
+    <div style="margin-top:.7rem;font-size:.75rem;color:var(--muted);text-transform:uppercase;letter-spacing:.08em">Ancho estéreo por banda</div>
+    ${stereoRows}
+    ${issuesHtml ? `<ul style="margin-top:.7rem;font-size:.78rem;padding-left:1.1rem">${issuesHtml}</ul>` : ""}
+    ${tipsHtml ? `<ul style="margin-top:.5rem;font-size:.78rem;color:var(--muted);padding-left:1.1rem">${tipsHtml}</ul>` : ""}
+    ${msEqHtml}
+  `;
+        // Append detailed reference analysis panel
+        const detailHtml = renderReferenceAnalysisPanel(refAnalysis, ownAnalysis, rm);
+        if (detailHtml) panel.insertAdjacentHTML('beforeend', detailHtml);
+        getContent().appendChild(panel);
+      }
+
+      document.getElementById("btnAB").addEventListener("click", () => {
+        if (!selectedFile) return;
+        showABPanel();
+      });
+      function showABPanel() {
+        let wrap = document.getElementById("abPanelWrap");
+        if (wrap) return;
+        clearResults();
+        wrap = document.createElement("div");
+        wrap.id = "abPanelWrap";
+        wrap.className = "ab-wrap";
+        wrap.innerHTML = `
+    <h3>⚡ Comparación A/B</h3>
+    <p style="font-size:.8rem;color:var(--muted);margin-bottom:1rem">Guardá dos versiones (A y B) y comparalas.</p>
+    <div class="ab-controls">
+      <button class="ab-btn" id="abCaptureA">📸 Capturar A</button>
+      <button class="ab-btn" id="abCaptureB">📸 Capturar B</button>
+      <button class="ab-btn" id="abPlayA" disabled>▶ A</button>
+      <button class="ab-btn" id="abPlayB" disabled>▶ B</button>
+    </div>
+    <div id="abStatus" style="font-family:var(--mono);font-size:.75rem;color:var(--muted)">Capturá A y B.</div>
+    <div id="abAudioWrap" style="margin-top:1rem"></div>
+  `;
+        document.getElementById("content").appendChild(wrap);
+        document.getElementById("abCaptureA").onclick = () => captureAB("A");
+        document.getElementById("abCaptureB").onclick = () => captureAB("B");
+        document.getElementById("abPlayA").onclick = () => playAB("A");
+        document.getElementById("abPlayB").onclick = () => playAB("B");
+      }
+
+      async function captureAB(slot) {
+        if (!selectedFile) {
+          document.getElementById("abStatus").textContent = "Selecciona un archivo primero.";
+          return;
+        }
+        const status = document.getElementById("abStatus");
+        status.textContent = `Capturando ${slot}…`;
+        const fd = new FormData();
+        fd.append("file", selectedFile);
+        try {
+          const params = buildParams();
+          params.set("preview_seconds", "10");
+          const url = `${API()}/preview?${params.toString()}`;
+          const res = await fetch(url, { method: "POST", body: fd });
+          if (!res.ok) {
+            const text = await res.text();
+            throw new Error(`HTTP ${res.status}: ${text}`);
+          }
+          const blob = await res.blob();
+          if (slot === "A") {
+            abSnapshotA = { blob, label: "A" };
+            document.getElementById("abPlayA").disabled = false;
+            document.getElementById("abPlayA").classList.add("active-a");
+          } else {
+            abSnapshotB = { blob, label: "B" };
+            document.getElementById("abPlayB").disabled = false;
+            document.getElementById("abPlayB").classList.add("active-b");
+          }
+          status.textContent = `${slot} capturado ✓. ${abSnapshotA && abSnapshotB ? "Ambos listos." : ""}`;
+        } catch (e) {
+          console.error("Error capturando:", e);
+          status.textContent = "Error: " + e.message;
+        }
+      }
+
+      function playAB(slot) {
+        const snap = slot === "A" ? abSnapshotA : abSnapshotB;
+        if (!snap) return;
+        const wrap = document.getElementById("abAudioWrap");
+        const url = URL.createObjectURL(snap.blob);
+        wrap.innerHTML = `<div style="font-family:var(--mono);font-size:.75rem;color:${slot === "A" ? "var(--accent)" : "var(--yellow)"};margin-bottom:.3rem">▶ ${slot}</div><audio controls autoplay src="${url}" style="width:100%"></audio>`;
+      }
+
+      // ── Advice ──────────────────────────────────────────────────────────────────
+      function renderAdvicePanel(adviceData, title, subtitle) {
+        const panel = document.createElement("div");
+        panel.className = "advice-panel";
+        const score = adviceData.score ?? 0,
+          grade = adviceData.grade ?? "";
+        const issues = adviceData.issues ?? [],
+          tips = adviceData.tips ?? [];
+        const gradeClass =
+          grade === "Excelente"
+            ? "grade-ex"
+            : grade === "Buena"
+              ? "grade-good"
+              : grade === "Aceptable"
+                ? "grade-ok"
+                : "grade-bad";
+        const issuesHtml = issues.length
+          ? `<ul class="advice-issues">${issues.map((i) => `<li>${i}</li>`).join("")}</ul>`
+          : "";
+        const tipsHtml = tips.length ? `<ul class="advice-tips">${tips.map((t) => `<li>${t}</li>`).join("")}</ul>` : "";
+        panel.innerHTML = `<h3>${title}${subtitle ? ` <span style="color:var(--muted);font-weight:400">${subtitle}</span>` : ""}</h3><div class="advice-score-row"><div class="advice-score-circle"><span class="score-num">${score}</span><span class="score-label">/ 100</span></div><div><div class="advice-grade ${gradeClass}">${grade}</div><div style="font-size:.75rem;color:var(--muted);margin-top:.2rem">${issues.length} problema${issues.length !== 1 ? "s" : ""}</div></div></div>${issuesHtml}${tipsHtml}`;
+        getContent().appendChild(panel);
+      }
