@@ -23,6 +23,10 @@
           stereo_blend: (parseFloat(document.getElementById("s-ref-stereoblend").value) / 100).toFixed(2),
           band_gains_array: window.refBandEQ ? window.refBandEQ.getGainsArray() : [],
           ms_eq_matching: document.getElementById("s-ref-ms-eq") ? document.getElementById("s-ref-ms-eq").checked : true,
+          premium_match_profile: document.getElementById("s-ref-premium-profile")?.value || "balanced",
+          premium_vocal_protect: document.getElementById("s-ref-vocal-protect")?.checked ?? true,
+          premium_translation_check: document.getElementById("s-ref-translation-check")?.checked ?? true,
+          premium_alt_versions: document.getElementById("s-ref-alt-versions")?.checked ?? false,
         };
       }
       const REF_PARAM_LABELS = {
@@ -42,6 +46,10 @@
         dynamics_margin_db: "Margen dinámica (dB)",
         stereo_blend: "Mezcla estéreo",
         band_gains_array: "Bandas de EQ manual",
+        premium_match_profile: "Perfil premium",
+        premium_vocal_protect: "Protección de voz/centro",
+        premium_translation_check: "Chequeo de traducción",
+        premium_alt_versions: "Metadata versiones alternativas",
       };
 
       async function submitReferenceMasterJob() {

@@ -524,6 +524,46 @@
                         </div>
                       </div>
                     </details>
+
+                    <details style="margin-bottom: 0.6rem">
+                      <summary
+                        style="
+                          font-size: 0.7rem;
+                          color: var(--amber);
+                          cursor: pointer;
+                          margin-bottom: 0.45rem;
+                          user-select: none;
+                        "
+                      >
+                        💎 Funciones premium para match profesional
+                      </summary>
+                      <div style="margin-top:0.45rem;border:1px solid rgba(245,158,11,.25);border-radius:8px;padding:0.65rem;background:linear-gradient(180deg,rgba(245,158,11,.08),rgba(255,255,255,.02))">
+                        <div class="param" style="margin-bottom:0.45rem">
+                          <label>Perfil de matching</label>
+                          <select id="s-ref-premium-profile" style="margin-top:0.25rem">
+                            <option value="balanced">Balanceado / streaming</option>
+                            <option value="club">Club punchy</option>
+                            <option value="audiophile">Audiophile transparente</option>
+                            <option value="broadcast">Broadcast seguro</option>
+                          </select>
+                        </div>
+                        <label style="display:flex;align-items:center;gap:0.4rem;font-size:0.72rem;cursor:pointer;margin:0.35rem 0">
+                          <input type="checkbox" id="s-ref-vocal-protect" checked style="width:auto;cursor:pointer;accent-color:var(--amber)" />
+                          <span>🛡 Proteger voz líder y centro mono</span>
+                        </label>
+                        <label style="display:flex;align-items:center;gap:0.4rem;font-size:0.72rem;cursor:pointer;margin:0.35rem 0">
+                          <input type="checkbox" id="s-ref-translation-check" checked style="width:auto;cursor:pointer;accent-color:var(--amber)" />
+                          <span>📱 Chequeo de traducción: mono, auriculares y parlantes chicos</span>
+                        </label>
+                        <label style="display:flex;align-items:center;gap:0.4rem;font-size:0.72rem;cursor:pointer;margin:0.35rem 0 0">
+                          <input type="checkbox" id="s-ref-alt-versions" style="width:auto;cursor:pointer;accent-color:var(--amber)" />
+                          <span>🧪 Preparar metadata para versiones alternativas (clean, instrumental, TV)</span>
+                        </label>
+                        <p style="margin:0.5rem 0 0;color:var(--muted);font-size:0.65rem;line-height:1.45">
+                          Estas opciones viajan al backend y quedan registradas en el reporte del job para habilitar flujos premium auditables.
+                        </p>
+                      </div>
+                    </details>
                     <button
                       class="btn btn-ref"
                       id="btnMasterRef"
