@@ -5168,6 +5168,10 @@ def process_audio_with_reference(
     match_sub_bass: bool = True,
     match_desser: bool = True,
     match_saturation: bool = True,
+    premium_match_profile: str = "balanced",
+    premium_vocal_protect: bool = True,
+    premium_translation_check: bool = True,
+    premium_alt_versions: bool = False,
     progress_cb=None,
     band_gains_db: list = None,
 ) -> dict:
@@ -5478,6 +5482,12 @@ def process_audio_with_reference(
             "saturation_character":     saturation_meta,
             "limiter_ceiling":          round(ceiling, 4),
             "intelligent_report":       intelligent_report,
+            "premium_features": {
+                "match_profile": str(premium_match_profile),
+                "vocal_protect": bool(premium_vocal_protect),
+                "translation_check": bool(premium_translation_check),
+                "alt_versions": bool(premium_alt_versions),
+            },
         },
         "chain_meters": {
             "post_limiter": {
