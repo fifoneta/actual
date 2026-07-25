@@ -790,6 +790,75 @@ def measure_lufs_integrated(audio: np.ndarray, sr: int) -> float:
     rms = np.sqrt(np.mean(mono ** 2)) + 1e-9
     return float(20.0 * np.log10(rms) - 0.691)
 
+
+
+def measure_human_weighted_loudness(audio: np.ndarray, sr: int, sensitivity_amount: float = 0.65) -> dict:
+    """LUFS perceptual adaptativo para decisiones de matching.
+
+    Mantiene el LUFS integrado BS.1770 como base, pero aplica una corrección
+    psicoacústica suave cuando la zona donde el oído es más sensible
+    (aprox. 3-6 kHz, con hombros en 1-3 kHz y 6-9 kHz) está más o menos
+    presente que en un balance tonal típico. No reemplaza el LUFS estándar para
+    reportes de plataforma; sirve para calcular una ganancia que suene más
+    pareja al oído humano al comparar contra una referencia.
+    """
+    standard_lufs = measure_lufs_integrated(audio, sr)
+    mono = audio.mean(axis=0) if audio.ndim == 2 else audio
+    mono = np.asarray(mono, dtype=np.float64)
+    if mono.size < max(128, int(sr * 0.05)):
+        return {
+            "standard_lufs": round(float(standard_lufs), 2),
+            "perceived_lufs": round(float(standard_lufs), 2),
+            "presence_correction_db": 0.0,
+            "presence_relative_db": 0.0,
+            "sensitivity_band_hz": [3000, 6000],
+            "sensitivity_amount": round(float(sensitivity_amount), 3),
+        }
+
+    full_rms = float(np.sqrt(np.mean(mono ** 2)) + 1e-12)
+    full_db = 20.0 * np.log10(full_rms)
+    nyquist = sr / 2.0
+
+    def _band_rms(lo: float, hi: float) -> float:
+        lo = float(np.clip(lo, 20.0, nyquist - 10.0))
+        hi = float(np.clip(hi, lo + 10.0, nyquist - 1.0))
+        if hi <= lo or hi >= nyquist:
+            return 1e-12
+        sos = butter(3, [lo, hi], btype="bandpass", fs=sr, output="sos")
+        band = sosfiltfilt(sos, mono)
+        return float(np.sqrt(np.mean(band ** 2)) + 1e-12)
+
+    # Zona de máxima sensibilidad + hombros para evitar que el cálculo dependa
+    # de una banda demasiado estrecha. La referencia principal es 3-6 kHz.
+    bands = [
+        (1000.0, 3000.0, 0.35),
+        (3000.0, 6000.0, 1.00),
+        (6000.0, 9000.0, 0.35),
+    ]
+    weighted_power = 0.0
+    weight_sum = 0.0
+    for lo, hi, w in bands:
+        rms = _band_rms(lo, hi)
+        weighted_power += w * (rms ** 2)
+        weight_sum += w
+    presence_rms = float(np.sqrt(weighted_power / max(weight_sum, 1e-12)) + 1e-12)
+    presence_db = 20.0 * np.log10(presence_rms)
+
+    # En masters balanceados, esta región suele medir bastante por debajo del
+    # RMS total. Usamos -10 dB como punto neutro y limitamos la corrección para
+    # no convertir el match de loudness en un EQ encubierto.
+    presence_relative_db = float(presence_db - full_db)
+    correction_db = float(np.clip((presence_relative_db + 10.0) * sensitivity_amount, -4.0, 4.0))
+    perceived_lufs = float(standard_lufs + correction_db)
+    return {
+        "standard_lufs": round(float(standard_lufs), 2),
+        "perceived_lufs": round(perceived_lufs, 2),
+        "presence_correction_db": round(correction_db, 2),
+        "presence_relative_db": round(presence_relative_db, 2),
+        "sensitivity_band_hz": [3000, 6000],
+        "sensitivity_amount": round(float(sensitivity_amount), 3),
+    }
+
 def eq_high_pass(audio: np.ndarray, sr: int, cutoff_hz: float = 80.0) -> np.ndarray:
     cutoff_hz = float(np.clip(cutoff_hz, 5.0, sr / 2.0 - 1.0))
     sos = butter(4, cutoff_hz, btype="highpass", fs=sr, output="sos")
@@ -5168,6 +5237,8 @@ def process_audio_with_reference(
     match_sub_bass: bool = True,
     match_desser: bool = True,
     match_saturation: bool = True,
+    adaptive_loudness_weighting: bool = True,
+    loudness_sensitivity_amount: float = 0.65,
     premium_match_profile: str = "balanced",
     premium_vocal_protect: bool = True,
     premium_translation_check: bool = True,
@@ -5408,9 +5479,28 @@ def process_audio_with_reference(
     # ── 8. Loudness (LUFS) ─────────────────────────────────────────────────
     _report(progress_cb, 77, "Igualando loudness (LUFS) contra la referencia")
     loudness_gain_db = 0.0
+    loudness_match_meta = {"mode": "standard_lufs", "adaptive": False}
     if match_loudness:
-        cur_lufs = measure_lufs_integrated(audio, sr)
-        loudness_gain_db = float(np.clip(analysis_reference["lufs"] - cur_lufs, -24.0, 24.0))
+        if adaptive_loudness_weighting:
+            cur_loudness = measure_human_weighted_loudness(audio, sr, loudness_sensitivity_amount)
+            ref_loudness = measure_human_weighted_loudness(ref_audio, ref_sr, loudness_sensitivity_amount)
+            loudness_gain_db = float(np.clip(ref_loudness["perceived_lufs"] - cur_loudness["perceived_lufs"], -24.0, 24.0))
+            loudness_match_meta = {
+                "mode": "human_weighted_lufs",
+                "adaptive": True,
+                "source": cur_loudness,
+                "reference": ref_loudness,
+                "target_basis": "perceived_lufs_with_3_6khz_sensitivity",
+            }
+        else:
+            cur_lufs = measure_lufs_integrated(audio, sr)
+            loudness_gain_db = float(np.clip(analysis_reference["lufs"] - cur_lufs, -24.0, 24.0))
+            loudness_match_meta = {
+                "mode": "standard_lufs",
+                "adaptive": False,
+                "source": {"standard_lufs": round(float(cur_lufs), 2)},
+                "reference": {"standard_lufs": round(float(analysis_reference["lufs"]), 2)},
+            }
         audio = audio * (10.0 ** (loudness_gain_db / 20.0))
 
     # ── 9. Limitador, techo aproximado al pico de la referencia ───────────
@@ -5469,6 +5559,7 @@ def process_audio_with_reference(
             "eq_curve_db":             [{"freq_hz": round(f, 1), "gain_db": round(g, 2)} for f, g in curve],
             "band_gains_applied":      _applied_band_gains,
             "loudness_gain_applied_db": round(loudness_gain_db, 2),
+            "loudness_match":          loudness_match_meta,
             "eq_match_blend":          round(eq_match_blend, 3),
             "oversample":              ovs,
             "oversample_mode":         str(oversample_mode),

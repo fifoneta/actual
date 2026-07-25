@@ -23,6 +23,8 @@
           stereo_blend: (parseFloat(document.getElementById("s-ref-stereoblend").value) / 100).toFixed(2),
           band_gains_array: window.refBandEQ ? window.refBandEQ.getGainsArray() : [],
           ms_eq_matching: document.getElementById("s-ref-ms-eq") ? document.getElementById("s-ref-ms-eq").checked : true,
+          adaptive_loudness_weighting: document.getElementById("s-ref-adaptive-loudness")?.checked ?? true,
+          loudness_sensitivity_amount: ((parseFloat(document.getElementById("s-ref-loudness-sensitivity")?.value || "65") / 100)).toFixed(2),
           premium_match_profile: document.getElementById("s-ref-premium-profile")?.value || "balanced",
           premium_vocal_protect: document.getElementById("s-ref-vocal-protect")?.checked ?? true,
           premium_translation_check: document.getElementById("s-ref-translation-check")?.checked ?? true,
@@ -46,6 +48,8 @@
         dynamics_margin_db: "Margen dinámica (dB)",
         stereo_blend: "Mezcla estéreo",
         band_gains_array: "Bandas de EQ manual",
+        adaptive_loudness_weighting: "LUFS adaptativo al oído",
+        loudness_sensitivity_amount: "Sensibilidad 3–6 kHz",
         premium_match_profile: "Perfil premium",
         premium_vocal_protect: "Protección de voz/centro",
         premium_translation_check: "Chequeo de traducción",
@@ -810,6 +814,10 @@
         const loudnessBar = _matchBarRow(
           "Loudness (LUFS)", ownAnalysis?.lufs, refAnalysis?.lufs, " LUFS", 0.5, (v) => v.toFixed(1)
         );
+        const loudnessMatch = rm.loudness_match || {};
+        const adaptiveLoudnessHtml = loudnessMatch.adaptive
+          ? `<div class="ref-match-step" style="flex-basis:100%">👂 LUFS perceptual: propio <b>${loudnessMatch.source?.perceived_lufs ?? "--"}</b> · ref <b>${loudnessMatch.reference?.perceived_lufs ?? "--"}</b> · corrección 3–6 kHz <b>${loudnessMatch.source?.presence_correction_db ?? "--"} / ${loudnessMatch.reference?.presence_correction_db ?? "--"} dB</b></div>`
+          : "";
 
         const tipsHtml = (report.tips || []).map((t) => `<li>${t}</li>`).join("");
         const issuesHtml = (report.issues || []).map((t) => `<li style="color:var(--red,#e05)">${t}</li>`).join("");
@@ -827,6 +835,7 @@
     ${loudnessBar}
     <div class="ref-match-steps">
       <div class="ref-match-step">Ganancia aplicada: <b>${rm.loudness_gain_applied_db >= 0 ? "+" : ""}${rm.loudness_gain_applied_db} dB</b></div>
+      ${adaptiveLoudnessHtml}
       <div class="ref-match-step">Techo limiter: <b>${(20 * Math.log10(rm.limiter_ceiling)).toFixed(2)} dBFS</b></div>
       <div class="ref-match-step" style="flex-basis:100%">${lraText}</div>
     </div>

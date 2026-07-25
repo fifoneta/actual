@@ -547,6 +547,24 @@
                             <option value="broadcast">Broadcast seguro</option>
                           </select>
                         </div>
+
+                        <label style="display:flex;align-items:center;gap:0.4rem;font-size:0.72rem;cursor:pointer;margin:0.35rem 0">
+                          <input type="checkbox" id="s-ref-adaptive-loudness" checked style="width:auto;cursor:pointer;accent-color:var(--amber)" />
+                          <span>👂 LUFS adaptativo al oído humano <span style="font-size:.65rem;color:var(--muted)">(más sensible 3–6 kHz)</span></span>
+                        </label>
+                        <div class="param" style="margin-bottom:0.45rem">
+                          <label>Sensibilidad auditiva 3–6 kHz</label>
+                          <span class="val" id="v-ref-loudness-sensitivity">65%</span>
+                          <input
+                            type="range"
+                            id="s-ref-loudness-sensitivity"
+                            min="0"
+                            max="100"
+                            step="5"
+                            value="65"
+                            oninput="document.getElementById('v-ref-loudness-sensitivity').textContent = this.value + '%'"
+                          />
+                        </div>
                         <label style="display:flex;align-items:center;gap:0.4rem;font-size:0.72rem;cursor:pointer;margin:0.35rem 0">
                           <input type="checkbox" id="s-ref-vocal-protect" checked style="width:auto;cursor:pointer;accent-color:var(--amber)" />
                           <span>🛡 Proteger voz líder y centro mono</span>
