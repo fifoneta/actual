@@ -524,6 +524,61 @@
                         </div>
                       </div>
                     </details>
+
+                    <details class="ref-premium-panel">
+                      <summary class="ref-premium-summary">
+                        <span>💎 Funciones premium</span>
+                        <small>Match profesional · oído humano</small>
+                      </summary>
+                      <div class="ref-premium-body">
+                        <div class="ref-premium-profile">
+                          <label for="s-ref-premium-profile">Perfil</label>
+                          <select id="s-ref-premium-profile">
+                            <option value="balanced">Balanceado / streaming</option>
+                            <option value="club">Club punchy</option>
+                            <option value="audiophile">Audiophile transparente</option>
+                            <option value="broadcast">Broadcast seguro</option>
+                          </select>
+                        </div>
+
+                        <label class="ref-premium-toggle ref-premium-toggle-wide">
+                          <input type="checkbox" id="s-ref-adaptive-loudness" checked />
+                          <span>
+                            <b>👂 LUFS adaptativo</b>
+                            <small>Prioriza la sensibilidad 3–6 kHz.</small>
+                          </span>
+                        </label>
+
+                        <div class="param ref-premium-range">
+                          <label>Sensibilidad 3–6 kHz</label>
+                          <span class="val" id="v-ref-loudness-sensitivity">65%</span>
+                          <input
+                            type="range"
+                            id="s-ref-loudness-sensitivity"
+                            min="0"
+                            max="100"
+                            step="5"
+                            value="65"
+                            oninput="document.getElementById('v-ref-loudness-sensitivity').textContent = this.value + '%'"
+                          />
+                        </div>
+
+                        <div class="ref-premium-toggle-grid">
+                          <label class="ref-premium-toggle">
+                            <input type="checkbox" id="s-ref-vocal-protect" checked />
+                            <span><b>🛡 Voz/centro</b><small>Protección mono.</small></span>
+                          </label>
+                          <label class="ref-premium-toggle">
+                            <input type="checkbox" id="s-ref-translation-check" checked />
+                            <span><b>📱 Traducción</b><small>Mono · earbuds · small.</small></span>
+                          </label>
+                          <label class="ref-premium-toggle ref-premium-toggle-wide">
+                            <input type="checkbox" id="s-ref-alt-versions" />
+                            <span><b>🧪 Versiones alt</b><small>Clean · instrumental · TV.</small></span>
+                          </label>
+                        </div>
+                      </div>
+                    </details>
                     <button
                       class="btn btn-ref"
                       id="btnMasterRef"

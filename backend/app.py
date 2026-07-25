@@ -2046,6 +2046,9 @@ def _read_reference_params(
     dynamics_margin_db: float = 1.0, stereo_blend: float = 0.85,
     match_transient: bool = True, match_sub_bass: bool = True, match_desser: bool = True,
     match_saturation: bool = True, ms_eq_matching: bool = True,
+    adaptive_loudness_weighting: bool = True, loudness_sensitivity_amount: float = 0.65,
+    premium_match_profile: str = "balanced", premium_vocal_protect: bool = True,
+    premium_translation_check: bool = True, premium_alt_versions: bool = False,
 ) -> dict:
     return dict(
         eq_bands=eq_bands, eq_max_boost_db=eq_max_boost_db, eq_max_cut_db=eq_max_cut_db,
@@ -2058,6 +2061,12 @@ def _read_reference_params(
         dynamics_margin_db=dynamics_margin_db, stereo_blend=stereo_blend,
         match_transient=match_transient, match_sub_bass=match_sub_bass, match_desser=match_desser,
         match_saturation=match_saturation, ms_eq_matching=ms_eq_matching,
+        adaptive_loudness_weighting=adaptive_loudness_weighting,
+        loudness_sensitivity_amount=loudness_sensitivity_amount,
+        premium_match_profile=premium_match_profile,
+        premium_vocal_protect=premium_vocal_protect,
+        premium_translation_check=premium_translation_check,
+        premium_alt_versions=premium_alt_versions,
     )
 
 @app.post("/master/reference", tags=["Mastering"])
@@ -2092,6 +2101,12 @@ async def master_with_reference(
     match_desser: bool         = Query(True, description="De-esser calibrado: corrige sibilancia solo si el track supera a la referencia"),
     match_saturation: bool     = Query(True, description="Iguala carácter armónico/saturación (asimetría de onda + densidad espectral) contra la referencia"),
     ms_eq_matching: bool       = Query(True, description="EQ de matching independiente para Mid y Side (recomendado para stereo)"),
+    adaptive_loudness_weighting: bool = Query(True, description="Usa LUFS perceptual adaptativo: pondera la zona 3-6 kHz, donde el oído humano es más sensible, al igualar loudness contra la referencia"),
+    loudness_sensitivity_amount: float = Query(0.65, ge=0.0, le=1.0, description="Intensidad de la ponderación auditiva 3-6 kHz para el match de loudness"),
+    premium_match_profile: str = Query("balanced", pattern="^(balanced|club|audiophile|broadcast)$", description="Perfil premium que documenta la intención del match y habilita automatizaciones futuras"),
+    premium_vocal_protect: bool = Query(True, description="Protege voz líder y centro mono en flujos premium"),
+    premium_translation_check: bool = Query(True, description="Registra chequeos de traducción mono/auriculares/parlantes chicos"),
+    premium_alt_versions: bool = Query(False, description="Prepara metadata para versiones clean/instrumental/TV"),
 ):
     data, filename = await resolve_input_source(file, library_id)
     # Si el ID viene de la biblioteca de referencias permanentes, leerlo directo
@@ -2114,7 +2129,10 @@ async def master_with_reference(
                                     hp_cutoff, limiter_release_ms, output_format,
                                     output_bit_depth, dynamics_margin_db, stereo_blend,
                                     match_transient, match_sub_bass, match_desser,
-                                    match_saturation, ms_eq_matching)
+                                    match_saturation, ms_eq_matching,
+                                    adaptive_loudness_weighting, loudness_sensitivity_amount,
+                                    premium_match_profile, premium_vocal_protect,
+                                    premium_translation_check, premium_alt_versions)
     duration = _get_input_duration(input_path)
     job_params = dict(params, reference_filename=reference_filename)
     if duration is not None:
@@ -2152,6 +2170,12 @@ async def master_with_reference_sync(
     match_sub_bass: bool       = Query(True),
     match_desser: bool         = Query(True),
     match_saturation: bool     = Query(True),
+    adaptive_loudness_weighting: bool = Query(True),
+    loudness_sensitivity_amount: float = Query(0.65, ge=0.0, le=1.0),
+    premium_match_profile: str = Query("balanced", pattern="^(balanced|club|audiophile|broadcast)$"),
+    premium_vocal_protect: bool = Query(True),
+    premium_translation_check: bool = Query(True),
+    premium_alt_versions: bool = Query(False),
 ):
     data, filename = await resolve_input_source(file, library_id)
     # Si el ID viene de la biblioteca de referencias permanentes, leerlo directo
@@ -2181,6 +2205,12 @@ async def master_with_reference_sync(
             dynamics_margin_db=dynamics_margin_db, stereo_blend=stereo_blend,
             match_transient=match_transient, match_sub_bass=match_sub_bass, match_desser=match_desser,
             match_saturation=match_saturation,
+            adaptive_loudness_weighting=adaptive_loudness_weighting,
+            loudness_sensitivity_amount=loudness_sensitivity_amount,
+            premium_match_profile=premium_match_profile,
+            premium_vocal_protect=premium_vocal_protect,
+            premium_translation_check=premium_translation_check,
+            premium_alt_versions=premium_alt_versions,
         )
         mt = "audio/mpeg" if output_format == "mp3" else ("audio/flac" if output_format == "flac" else "audio/wav")
         headers = {"X-Reference-Match": str(result["reference_match"]["after"]["match_percent"])}
